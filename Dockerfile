@@ -2,7 +2,7 @@ FROM openjdk:11
 RUN apt update
 RUN apt install -y make
 RUN mkdir /vex
-RUN git clone https://github.com/propensive/dotty /vex/scala
+RUN git clone https://github.com/lampepfl/dotty /vex/scala
 RUN mkdir -p /vex/bin
 RUN curl -Lo /vex/sbt.tgz https://github.com/sbt/sbt/releases/download/v1.6.1/sbt-1.6.1.tgz
 RUN tar xvf /vex/sbt.tgz -C /vex
