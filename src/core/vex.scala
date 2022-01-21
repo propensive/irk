@@ -31,7 +31,7 @@ import encodings.Utf8
 given Env = envs.enclosing
 import rendering.ansi
 
-given LogFormat[SystemOut.type, AnsiString] = LogFormat.timed
+given LogFormat[SystemOut.type, AnsiText] = LogFormat.timed
 given Log()
 
 case class Message(module: Text, path: Text, line: Int, from: Int, to: Int, message: Text,
@@ -104,9 +104,6 @@ case class Build(pwd: Directory, repos: Map[DiskPath, Text], publishing: Option[
       case err: IoError =>
         throw AppError(t"There was an IO error while reading the cache",err)
       
-      case err: JsonTypeError =>
-        throw AppError(t"The cache file did not contain the correct JSON format", err)
-      
       case err: JsonAccessError =>
         throw AppError(t"The cache file did not contain the correct JSON format", err)
       
@@ -140,9 +137,6 @@ case class Build(pwd: Directory, repos: Map[DiskPath, Text], publishing: Option[
         
         case err: IoError =>
           throw AppError(t"There was an IO error while reading the cache", err)
-        
-        case err: JsonTypeError =>
-          throw AppError(t"The cache file did not contain the correct JSON format", err)
         
         case err: JsonAccessError =>
           throw AppError(t"The cache file did not contain the correct JSON format", err)
@@ -514,22 +508,23 @@ object Vex extends Daemon():
           results =>
             Future.sequence(step.jars.map(Vex.fetchFile(_))).flatMap:
               downloads => Future:
-                val messages = results.flatten
-                if messages.isEmpty then
-                  try
-                    if oldHashes.get(step) != build.hashes.get(step) || step.main.isDefined then
-                      Out.println(ansi"Compiling ${Green}[${step.name}]...")
-                      messages ++ step.compile(build.hashes, oldHashes, build, scriptFile)
-                    else messages
-                  catch
-                    case err: ExcessDataError =>
-                      messages + Message(step.id, t"<unknown>", 0, 0, 0, t"too much data was received", IArray())
-    
-                    case err: StreamCutError =>
-                      messages + Message(step.id, t"<unknown>", 0, 0, 0, t"the stream was cut prematurely", IArray())
-                else
-                  Out.println(t"Skipping compilation of ${step.name}")
-                  messages
+                blocking:
+                  val messages = results.flatten
+                  if messages.isEmpty then
+                    try
+                      if oldHashes.get(step) != build.hashes.get(step) || step.main.isDefined then
+                        Out.println(ansi"Compiling ${Green}[${step.name}]...")
+                        messages ++ step.compile(build.hashes, oldHashes, build, scriptFile)
+                      else messages
+                    catch
+                      case err: ExcessDataError =>
+                        messages + Message(step.id, t"<unknown>", 0, 0, 0, t"too much data was received", IArray())
+      
+                      case err: StreamCutError =>
+                        messages + Message(step.id, t"<unknown>", 0, 0, 0, t"the stream was cut prematurely", IArray())
+                  else
+                    Out.println(t"Skipping compilation of ${step.name}")
+                    messages
       .values
 
       val messages: List[Message] = Future.sequence(futures).await().to(Set).flatten.to(List)
@@ -542,48 +537,61 @@ object Vex extends Daemon():
       messages.groupBy(_.path).foreach:
         case (path, messages) =>
           val syntax = ScalaSyntax.highlight(String(messages.head.content.unsafeMutable).show)
-          messages.sortBy(-_.line).foreach:
-            case Message(module, path, line, from, to, message, _) =>
-              Out.println(ansi"${colors.Black}(${Bg(colors.Purple)}( $module ))${colors.Purple}(${Bg(colors.Crimson)}( ${colors.Black}($path:${line + 1}:$from) ))${colors.Crimson}()")
-              
-              def format(line: Int) =
-                if line >= syntax.length then ansi""
-                else syntax(line).map:
-                  case Token.Code(code, flair) => flair match
-                    case Flair.Type              => ansi"${colors.YellowGreen}(${code.trim})"
-                    case Flair.Term              => ansi"${colors.CadetBlue}(${code.trim})"
-                    case Flair.Symbol            => ansi"${colors.Turquoise}(${code.trim})"
-                    case Flair.Keyword           => ansi"${colors.DarkOrange}(${code.trim})"
-                    case Flair.Modifier          => ansi"${colors.Linen}(${code.trim})"
-                    case Flair.Ident             => ansi"${colors.BurlyWood}(${code.trim})"
-                    case Flair.Error             => ansi"${colors.OrangeRed}($Underline(${code.trim}))"
-                    case Flair.Number            => ansi"${colors.Gold}(${code.trim})"
-                    case Flair.String            => ansi"${colors.Plum}(${code.trim})"
-                    case other                   => ansi"${code.trim}"
-                  case Token.Space(n)          => ansi" "*n
-                  case Token.Newline           => throw Impossible("Should not have a newline")
-                .join
-              
-              val margin = (line + 2).show.length
-              val bg = Bg(Srgb(0.16, 0.06, 0.03))
-              
-              if line > 1 then
-                Out.print(ansi"$bg${colors.Orange}(${line.show.pad(margin, Rtl)})${colors.Gray}(│) ")
-                Out.println(ansi"${format(line - 1)}${escapes.EraseLine}")
-              
-              val code = format(line)
-              Out.print(ansi"$bg${colors.Orange}(${(line + 1).show.pad(margin, Rtl)})${colors.Gray}(│) ")
-              Out.print(ansi"${code.take(from)}")
-              Out.print(ansi"${Underline}(${colors.OrangeRed}(${code.plain.slice(from, to)}))")
-              Out.println(ansi"${code.drop(to)}${escapes.EraseLine}")
-              
-              if line + 1 < syntax.length
-              then
-                Out.print(ansi"$bg${colors.Orange}(${(line + 2).show.pad(margin, Rtl)})${colors.Gray}(│) ")
-                Out.println(ansi"${format(line + 1)}${escapes.EraseLine}${escapes.Reset}")
-              
-              Out.println(ansi"${escapes.Reset}")
-              Out.println(ansi"${Bold}(${message})")
+          messages.sortBy(-_.line).groupBy(_.line).foreach:
+            case (line, messages) => messages.last match
+              case Message(module, path, line, from, to, message, _) =>
+                val bg = Bg(Srgb(0.16, 0.06, 0.03))
+                Out.println(ansi"${colors.Black}(${Bg(colors.Purple)}( $module ))${colors.Purple}(${Bg(colors.Crimson)}( ${colors.Black}($path:${line + 1}:$from) ))$bg${colors.Crimson}()$bg${escapes.EraseLine}")
+                
+                def format(line: Int) =
+                  if line >= syntax.length then ansi""
+                  else syntax(line).map:
+                    case Token.Code(code, flair) => flair match
+                      case Flair.Type              => ansi"${colors.YellowGreen}(${code})"
+                      case Flair.Term              => ansi"${colors.CadetBlue}(${code})"
+                      case Flair.Symbol            => ansi"${colors.Turquoise}(${code})"
+                      case Flair.Keyword           => ansi"${colors.DarkOrange}(${code})"
+                      case Flair.Modifier          => ansi"${colors.Chocolate}(${code})"
+                      case Flair.Ident             => ansi"${colors.BurlyWood}(${code})"
+                      case Flair.Error             => ansi"${colors.OrangeRed}($Underline(${code}))"
+                      case Flair.Number            => ansi"${colors.Gold}(${code})"
+                      case Flair.String            => ansi"${colors.Plum}(${code})"
+                      case other                   => ansi"${code}"
+                    case Token.Space(n)          => ansi" "*n
+                    case Token.Newline           => throw Impossible("Should not have a newline")
+                  .join
+                
+                val margin = (line + 2).show.length
+                
+                if line > 1 then
+                  Out.print(ansi"${colors.Orange}(${line.show.pad(margin, Rtl)})${colors.Gray}(║)$bg ")
+                  Out.println(ansi"${format(line - 1)}${escapes.EraseLine}")
+                
+                val code = format(line)
+                Out.print(ansi"${colors.Orange}($Bold(${(line + 1).show.pad(margin, Rtl)}))${colors.Gray}(║)$bg ")
+                Out.print(ansi"${code.take(from)}")
+                Out.print(ansi"${Underline}(${colors.OrangeRed}(${code.plain.slice(from, to)}))")
+                Out.println(ansi"${code.drop(to)}${escapes.EraseLine}")
+                
+                if line + 1 < syntax.length
+                then
+                  Out.print(ansi"${colors.Orange}(${(line + 2).show.pad(margin, Rtl)})${colors.Gray}(║)$bg ")
+                  Out.println(ansi"${format(line + 1)}${escapes.EraseLine}${escapes.Reset}")
+                
+                messages.reverse.foreach:
+                  case m@Message(module, path, line, from, to, message, _) =>
+                    if m != messages.last then
+                      Out.print(ansi"${colors.Orange}($Bold(${(line + 1).show.pad(margin, Rtl)}))${colors.Gray}(║)$bg ")
+                      Out.print(ansi"${code.take(from)}")
+                      Out.print(ansi"${Underline}(${colors.OrangeRed}(${code.plain.slice(from, to)}))")
+                      Out.println(ansi"${code.drop(to)}${escapes.EraseLine}${escapes.Reset}")
+                    Out.println(ansi"${colors.Gray}(${t" "*margin}╟${t"─"*from}┴${t"─"*(to - from)}┘)${escapes.EraseLine}${escapes.Reset}")
+                    message.cut(t"\n").foreach:
+                      line =>
+                        Out.println(ansi"${t" "*margin}${colors.Gray}(║) ${Bold}($line)${escapes.EraseLine}${escapes.Reset}")
+                    if m != messages.head then Out.println(ansi"${t" "*margin}${colors.Gray}(║)")
+                Out.println(ansi"${t" "*margin}${colors.Gray}(╨)${escapes.EraseLine}${escapes.Reset}")
+                Out.println(ansi"${escapes.Reset}")
 
       if success then
         build.linearization.foreach:
@@ -608,8 +616,14 @@ object Vex extends Daemon():
                 .to(LazyList)
                 
                 val basicMf = ListMap(t"Manifest-Version" -> t"1.0", t"Created-By" -> t"Vex 0.2.0")
-                val manifest = step.main.fold(basicMf)(basicMf.updated(t"Main-Class", _))
-                def manifestStream(): DataStream = LazyList(manifest.map(_+t": "+_).join(t"", t"\n", t"\n").bytes)
+                
+                val manifest = step.main.fold(basicMf)(basicMf.updated(t"Main-Class", _)).flatMap:
+                  (k, v) =>
+                    val (first, rest) = t"$k: $v".snip(72)
+                    first :: rest.s.grouped(71).map(t" "+_.show).to(List)
+                .join(t"", t"\n", t"\n")
+                
+                def manifestStream(): DataStream = LazyList(manifest.bytes)
                 val mfEntry = Zip.Entry(Relative.parse(t"META-INF/MANIFEST.MF"), manifestStream)
                 
                 val header = if artifact.name.endsWith(t".jar") then Bytes.empty else
